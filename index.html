@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mi Scooter</title>
+  <style>
+    * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background: #0f1115; color: #f0f2f5; margin: 0; padding: 16px; display: flex; flex-direction: column; align-items: center; }
+    .container { width: 100%; max-width: 360px; }
+    .card { background: #1a1e24; border-radius: 14px; padding: 18px; margin-bottom: 14px; border: 1px solid #2a303c; text-align: center; }
+    .btn { background: #0066ff; color: #fff; border: none; padding: 14px; border-radius: 10px; font-size: 1rem; font-weight: bold; width: 100%; cursor: pointer; }
+    .btn-maps { background: #00c853; color: #000; text-decoration: none; display: none; padding: 12px; border-radius: 10px; font-weight: bold; margin-top: 12px; text-align: center; }
+    .soc-val { font-size: 3rem; font-weight: 800; color: #00e676; margin: 5px 0; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .stat-box { background: #13171d; padding: 12px; border-radius: 8px; text-align: center; }
+    .stat-val { font-size: 1.2rem; font-weight: bold; color: #fff; }
+    .label { font-size: 0.8rem; color: #8a94a6; margin-top: 4px; }
+    .health-good { color: #00e676; }
+    .health-warn { color: #ffab00; }
+    .health-bad { color: #ff5252; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <button id="btnConnect" class="btn">Conectar con la Moto</button>
+      <div id="connStatus" class="label" style="margin-top: 8px;">Bluetooth desconectado</div>
+    </div>
+
+    <!-- Telemetría y Salud -->
+    <div class="card">
+      <div class="label">NIVEL DE CARGA ACTUAL</div>
+      <div id="soc" class="soc-val">--%</div>
+      
+      <div class="grid" style="margin-top: 10px;">
+        <div class="stat-box">
+          <div id="soh" class="stat-val">--%</div>
+          <div class="label">Salud (SoH)</div>
+        </div>
+        <div class="stat-box">
+          <div id="cycles" class="stat-val">--</div>
+          <div class="label">Ciclos Totales</div>
+        </div>
+        <div class="stat-box">
+          <div id="voltage" class="stat-val">-- V</div>
+          <div class="label">Voltaje Total</div>
+        </div>
+        <div class="stat-box">
+          <div id="current" class="stat-val">-- A</div>
+          <div class="label">Amperios</div>
+        </div>
+        <div class="stat-box">
+          <div id="capacity" class="stat-val">-- Ah</div>
+          <div class="label">Capacidad Actual</div>
+        </div>
+        <div class="stat-box">
+          <div id="temp" class="stat-val">-- °C</div>
+          <div class="label">Temperatura</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Registro de Ubicación -->
+    <div class="card">
+      <div class="label" style="letter-spacing: 0.5px;">ÚLTIMO APARCAMIENTO</div>
+      <div id="parkInfo" style="margin-top: 8px; font-size: 0.95rem; color: #cfd6e0;">Sin registros previos</div>
+      <a id="btnMaps" class="btn-maps" target="_blank" href="#">📍 Ver en Google Maps</a>
+    </div>
+  </div>
+
+  <script>
+    const SERVICE_UUID = "0000ff00-0000-1000-8000-00805f9b34fb";
+    const WRITE_UUID   = "0000ff02-0000-1000-8000-00805f9b34fb";
+    const NOTIFY_UUID  = "0000ff01-0000-1000-8000-00805f9b34fb";
+    const CMD_READ     = new Uint8Array([0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77]);
+
+    // Capacidad nominal según placa de tu pack LFP: 20 Ah
+    const NOMINAL_CAPACITY_AH = 20.0;
+
+    let bleDevice, writeCharacteristic, pollInterval;
+
+    window.addEventListener('DOMContentLoaded', () => {
+      const lat = localStorage.getItem('last_park_lat');
+      const lng = localStorage.getItem('last_park_lng');
+      const time = localStorage.getItem('last_park_time');
+      if (lat && lng) showParking(lat, lng, time);
+    });
+
+    document.getElementById('btnConnect').addEventListener('click', async () => {
+      try {
+        bleDevice = await navigator.bluetooth.requestDevice({
+          filters: [{ namePrefix: 'LLS' }, { namePrefix: 'LULIS' }, { namePrefix: 'JBD' }],
+          optionalServices: [SERVICE_UUID]
+        });
+
+        bleDevice.addEventListener('gattserverdisconnected', handleDisconnect);
+
+        const server = await bleDevice.gatt.connect();
+        const service = await server.getPrimaryService(SERVICE_UUID);
+        writeCharacteristic = await service.getCharacteristic(WRITE_UUID);
+        const notifyChar = await service.getCharacteristic(NOTIFY_UUID);
+
+        await notifyChar.startNotifications();
+        notifyChar.addEventListener('characteristicvaluechanged', onDataReceived);
+
+        document.getElementById('btnConnect').innerText = "Conectado";
+        document.getElementById('btnConnect').style.background = "#00c853";
+        document.getElementById('connStatus').innerText = "Telemetría activa en tiempo real";
+
+        pollInterval = setInterval(() => {
+          if (bleDevice && bleDevice.gatt.connected) {
+            writeCharacteristic.writeValue(CMD_READ);
+          }
+        }, 2000);
+
+      } catch (err) {
+        document.getElementById('connStatus').innerText = "Conexión cancelada o fallida";
+      }
+    });
+
+    function handleDisconnect() {
+      clearInterval(pollInterval);
+      document.getElementById('btnConnect').innerText = "Reconectar";
+      document.getElementById('btnConnect').style.background = "#0066ff";
+      document.getElementById('connStatus').innerText = "Moto apagada / Fuera de rango";
+
+      if ("geolocation" in navigator) {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            const lat = pos.coords.latitude;
+            const lng = pos.coords.longitude;
+            const now = new Date();
+            const timeStr = now.toLocaleDateString() + " " + now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+            localStorage.setItem('last_park_lat', lat);
+            localStorage.setItem('last_park_lng', lng);
+            localStorage.setItem('last_park_time', timeStr);
+
+            showParking(lat, lng, timeStr);
+          },
+          () => {
+            document.getElementById('parkInfo').innerText = "No se pudo obtener el GPS del móvil";
+          },
+          { enableHighAccuracy: true, timeout: 10000 }
+        );
+      }
+    }
+
+    function showParking(lat, lng, time) {
+      document.getElementById('parkInfo').innerText = `Aparcada: ${time}`;
+      const mapsBtn = document.getElementById('btnMaps');
+      mapsBtn.href = `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+      mapsBtn.style.display = "block";
+    }
+
+    function onDataReceived(event) {
+      const data = new DataView(event.target.value.buffer);
+      // Validar paquete básico Jiabaida (0xDD 0x03)
+      if (data.getUint8(0) === 0xDD && data.getUint8(1) === 0x03) {
+        const v = (data.getUint16(4) / 100).toFixed(1);
+        const a = (data.getInt16(6) / 100).toFixed(2);
+        const currentAh = data.getUint16(8) / 100; // Capacidad restante real en Ah
+        const fullAh = data.getUint16(10) / 100;    // Capacidad a carga completa actual
+        const cycles = data.getUint16(14);          // Ciclos acumulados
+        const soc = data.getUint8(23);              // SOC %
+        const temp = (((data.getUint16(27)) - 2731) / 10).toFixed(1);
+
+        // Cálculo de State of Health (SoH)
+        // Se compara la capacidad que admite a carga completa con la nominal de diseño
+        const targetCapacity = fullAh > 0 ? fullAh : NOMINAL_CAPACITY_AH;
+        let soh = Math.round((targetCapacity / NOMINAL_CAPACITY_AH) * 100);
+        if (soh > 100) soh = 100;
+
+        document.getElementById('voltage').innerText = `${v} V`;
+        document.getElementById('current').innerText = `${a} A`;
+        document.getElementById('capacity').innerText = `${currentAh.toFixed(1)} Ah`;
+        document.getElementById('soc').innerText = `${soc}%`;
+        document.getElementById('temp').innerText = `${temp} °C`;
+        document.getElementById('cycles').innerText = cycles;
+
+        const sohElem = document.getElementById('soh');
+        sohElem.innerText = `${soh}%`;
+        sohElem.className = "stat-val " + (soh >= 85 ? "health-good" : (soh >= 75 ? "health-warn" : "health-bad"));
+      }
+    }
+  </script>
+</body>
+</html>
