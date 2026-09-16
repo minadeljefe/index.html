@@ -28,7 +28,7 @@
       <div id="connStatus" class="label" style="margin-top: 8px;">Bluetooth desconectado</div>
     </div>
 
-    <!-- Telemetría y Salud -->
+    <!-- Nivel, Salud y Telemetría -->
     <div class="card">
       <div class="label">NIVEL DE CARGA ACTUAL</div>
       <div id="soc" class="soc-val">--%</div>
@@ -75,11 +75,12 @@
     const NOTIFY_UUID  = "0000ff01-0000-1000-8000-00805f9b34fb";
     const CMD_READ     = new Uint8Array([0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77]);
 
-    // Capacidad nominal según placa de tu pack LFP: 20 Ah
+    // Capacidad nominal según placa LFP de tu batería (20 Ah)
     const NOMINAL_CAPACITY_AH = 20.0;
 
     let bleDevice, writeCharacteristic, pollInterval;
 
+    // Cargar última ubicación guardada en el móvil
     window.addEventListener('DOMContentLoaded', () => {
       const lat = localStorage.getItem('last_park_lat');
       const lng = localStorage.getItem('last_park_lng');
@@ -89,9 +90,19 @@
 
     document.getElementById('btnConnect').addEventListener('click', async () => {
       try {
+        // Filtro configurado con el Bluetooth ID exacto de tu batería
         bleDevice = await navigator.bluetooth.requestDevice({
-          filters: [{ namePrefix: 'LLS' }, { namePrefix: 'LULIS' }, { namePrefix: 'JBD' }],
-          optionalServices: [SERVICE_UUID]
+          filters: [
+            { namePrefix: 'A4D1' },
+            { namePrefix: 'a4d1' },
+            { namePrefix: 'LLS' },
+            { namePrefix: 'LULIS' }
+          ],
+          optionalServices: [
+            SERVICE_UUID,
+            "0000ffe0-0000-1000-8000-00805f9b34fb",
+            "0000fff0-0000-1000-8000-00805f9b34fb"
+          ]
         });
 
         bleDevice.addEventListener('gattserverdisconnected', handleDisconnect);
@@ -106,7 +117,7 @@
 
         document.getElementById('btnConnect').innerText = "Conectado";
         document.getElementById('btnConnect').style.background = "#00c853";
-        document.getElementById('connStatus').innerText = "Telemetría activa en tiempo real";
+        document.getElementById('connStatus').innerText = "Telemetría activa: " + bleDevice.name;
 
         pollInterval = setInterval(() => {
           if (bleDevice && bleDevice.gatt.connected) {
@@ -125,6 +136,7 @@
       document.getElementById('btnConnect').style.background = "#0066ff";
       document.getElementById('connStatus').innerText = "Moto apagada / Fuera de rango";
 
+      // Guardar coordenadas GPS al perder conexión
       if ("geolocation" in navigator) {
         navigator.geolocation.getCurrentPosition(
           (pos) => {
@@ -156,18 +168,15 @@
 
     function onDataReceived(event) {
       const data = new DataView(event.target.value.buffer);
-      // Validar paquete básico Jiabaida (0xDD 0x03)
       if (data.getUint8(0) === 0xDD && data.getUint8(1) === 0x03) {
         const v = (data.getUint16(4) / 100).toFixed(1);
         const a = (data.getInt16(6) / 100).toFixed(2);
-        const currentAh = data.getUint16(8) / 100; // Capacidad restante real en Ah
-        const fullAh = data.getUint16(10) / 100;    // Capacidad a carga completa actual
-        const cycles = data.getUint16(14);          // Ciclos acumulados
-        const soc = data.getUint8(23);              // SOC %
+        const currentAh = data.getUint16(8) / 100;
+        const fullAh = data.getUint16(10) / 100;
+        const cycles = data.getUint16(14);
+        const soc = data.getUint8(23);
         const temp = (((data.getUint16(27)) - 2731) / 10).toFixed(1);
 
-        // Cálculo de State of Health (SoH)
-        // Se compara la capacidad que admite a carga completa con la nominal de diseño
         const targetCapacity = fullAh > 0 ? fullAh : NOMINAL_CAPACITY_AH;
         let soh = Math.round((targetCapacity / NOMINAL_CAPACITY_AH) * 100);
         if (soh > 100) soh = 100;
