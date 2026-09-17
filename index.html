@@ -70,17 +70,20 @@
   </div>
 
   <script>
-    const SERVICE_UUID = "0000ff00-0000-1000-8000-00805f9b34fb";
-    const WRITE_UUID   = "0000ff02-0000-1000-8000-00805f9b34fb";
-    const NOTIFY_UUID  = "0000ff01-0000-1000-8000-00805f9b34fb";
-    const CMD_READ     = new Uint8Array([0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77]);
+    // Servicios Bluetooth estándar en controladores BLE chinos
+    const CANDIDATE_SERVICES = [
+      "0000ff00-0000-1000-8000-00805f9b34fb",
+      "0000ffe0-0000-1000-8000-00805f9b34fb",
+      "0000fff0-0000-1000-8000-00805f9b34fb",
+      "0000fee7-0000-1000-8000-00805f9b34fb",
+      "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+    ];
 
-    // Capacidad nominal según placa LFP de tu batería (20 Ah)
+    const CMD_READ = new Uint8Array([0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77]);
     const NOMINAL_CAPACITY_AH = 20.0;
 
     let bleDevice, writeCharacteristic, pollInterval;
 
-    // Cargar última ubicación guardada en el móvil
     window.addEventListener('DOMContentLoaded', () => {
       const lat = localStorage.getItem('last_park_lat');
       const lng = localStorage.getItem('last_park_lng');
@@ -90,35 +93,47 @@
 
     document.getElementById('btnConnect').addEventListener('click', async () => {
       try {
-        // Filtro configurado con el Bluetooth ID exacto de tu batería
+        // Filtrado configurado con el nombre real 'LK8625'
         bleDevice = await navigator.bluetooth.requestDevice({
           filters: [
-            { namePrefix: 'A4D1' },
-            { namePrefix: 'a4d1' },
-            { namePrefix: 'LLS' },
-            { namePrefix: 'LULIS' }
+            { namePrefix: 'LK' },
+            { namePrefix: 'lk' },
+            { namePrefix: 'LK8625' },
+            { namePrefix: 'LLS' }
           ],
-          optionalServices: [
-            SERVICE_UUID,
-            "0000ffe0-0000-1000-8000-00805f9b34fb",
-            "0000fff0-0000-1000-8000-00805f9b34fb"
-          ]
+          optionalServices: CANDIDATE_SERVICES
         });
 
         bleDevice.addEventListener('gattserverdisconnected', handleDisconnect);
 
+        document.getElementById('connStatus').innerText = "Conectando con " + bleDevice.name + "...";
         const server = await bleDevice.gatt.connect();
-        const service = await server.getPrimaryService(SERVICE_UUID);
-        writeCharacteristic = await service.getCharacteristic(WRITE_UUID);
-        const notifyChar = await service.getCharacteristic(NOTIFY_UUID);
+
+        // Autodetección de canales de lectura y escritura
+        const services = await server.getPrimaryServices();
+        let notifyChar = null;
+
+        for (const s of services) {
+          const chars = await s.getCharacteristics();
+          for (const c of chars) {
+            if (c.properties.notify) notifyChar = c;
+            if (c.properties.write || c.properties.writeWithoutResponse) writeCharacteristic = c;
+          }
+          if (writeCharacteristic && notifyChar) break;
+        }
+
+        if (!writeCharacteristic || !notifyChar) {
+          throw new Error("No se encontraron canales de datos compatibles");
+        }
 
         await notifyChar.startNotifications();
         notifyChar.addEventListener('characteristicvaluechanged', onDataReceived);
 
         document.getElementById('btnConnect').innerText = "Conectado";
         document.getElementById('btnConnect').style.background = "#00c853";
-        document.getElementById('connStatus').innerText = "Telemetría activa: " + bleDevice.name;
+        document.getElementById('connStatus').innerText = "Enlazado a: " + bleDevice.name;
 
+        // Lectura de datos cada 2 segundos
         pollInterval = setInterval(() => {
           if (bleDevice && bleDevice.gatt.connected) {
             writeCharacteristic.writeValue(CMD_READ);
@@ -126,7 +141,7 @@
         }, 2000);
 
       } catch (err) {
-        document.getElementById('connStatus').innerText = "Conexión cancelada o fallida";
+        document.getElementById('connStatus').innerText = "Error: " + err.message;
       }
     });
 
@@ -136,7 +151,6 @@
       document.getElementById('btnConnect').style.background = "#0066ff";
       document.getElementById('connStatus').innerText = "Moto apagada / Fuera de rango";
 
-      // Guardar coordenadas GPS al perder conexión
       if ("geolocation" in navigator) {
         navigator.geolocation.getCurrentPosition(
           (pos) => {
