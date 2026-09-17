@@ -70,19 +70,19 @@
   </div>
 
   <script>
-    // Servicios Bluetooth estándar en controladores BLE chinos
+    // Servicios GATT exactos leídos de nRF Connect
     const CANDIDATE_SERVICES = [
-      "0000ff00-0000-1000-8000-00805f9b34fb",
-      "0000ffe0-0000-1000-8000-00805f9b34fb",
-      "0000fff0-0000-1000-8000-00805f9b34fb",
-      "0000fee7-0000-1000-8000-00805f9b34fb",
-      "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+      "00010203-0405-0607-0809-0a0b0c0dffe0",
+      "00010203-0405-0607-0809-0a0b0c0d1912",
+      "11110001-1111-1111-1111-111111111111",
+      "device_information"
     ];
 
     const CMD_READ = new Uint8Array([0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77]);
     const NOMINAL_CAPACITY_AH = 20.0;
 
     let bleDevice, writeCharacteristic, pollInterval;
+    let rxBuffer = new Uint8Array(0);
 
     window.addEventListener('DOMContentLoaded', () => {
       const lat = localStorage.getItem('last_park_lat');
@@ -93,13 +93,10 @@
 
     document.getElementById('btnConnect').addEventListener('click', async () => {
       try {
-        // Filtrado configurado con el nombre real 'LK8625'
         bleDevice = await navigator.bluetooth.requestDevice({
           filters: [
             { namePrefix: 'LK' },
-            { namePrefix: 'lk' },
-            { namePrefix: 'LK8625' },
-            { namePrefix: 'LLS' }
+            { namePrefix: 'lk' }
           ],
           optionalServices: CANDIDATE_SERVICES
         });
@@ -109,31 +106,31 @@
         document.getElementById('connStatus').innerText = "Conectando con " + bleDevice.name + "...";
         const server = await bleDevice.gatt.connect();
 
-        // Autodetección de canales de lectura y escritura
         const services = await server.getPrimaryServices();
         let notifyChar = null;
 
         for (const s of services) {
-          const chars = await s.getCharacteristics();
-          for (const c of chars) {
-            if (c.properties.notify) notifyChar = c;
-            if (c.properties.write || c.properties.writeWithoutResponse) writeCharacteristic = c;
-          }
+          try {
+            const chars = await s.getCharacteristics();
+            for (const c of chars) {
+              if (c.properties.notify || c.properties.indicate) notifyChar = c;
+              if (c.properties.write || c.properties.writeWithoutResponse) writeCharacteristic = c;
+            }
+          } catch(e) {}
           if (writeCharacteristic && notifyChar) break;
         }
 
         if (!writeCharacteristic || !notifyChar) {
-          throw new Error("No se encontraron canales de datos compatibles");
+          throw new Error("Canal de datos no encontrado.");
         }
 
         await notifyChar.startNotifications();
-        notifyChar.addEventListener('characteristicvaluechanged', onDataReceived);
+        notifyChar.addEventListener('characteristicvaluechanged', onRawChunk);
 
         document.getElementById('btnConnect').innerText = "Conectado";
         document.getElementById('btnConnect').style.background = "#00c853";
         document.getElementById('connStatus').innerText = "Enlazado a: " + bleDevice.name;
 
-        // Lectura de datos cada 2 segundos
         pollInterval = setInterval(() => {
           if (bleDevice && bleDevice.gatt.connected) {
             writeCharacteristic.writeValue(CMD_READ);
@@ -180,9 +177,25 @@
       mapsBtn.style.display = "block";
     }
 
-    function onDataReceived(event) {
-      const data = new DataView(event.target.value.buffer);
-      if (data.getUint8(0) === 0xDD && data.getUint8(1) === 0x03) {
+    // Ensamblador de paquetes BLE fragmentados
+    function onRawChunk(event) {
+      const chunk = new Uint8Array(event.target.value.buffer);
+      const temp = new Uint8Array(rxBuffer.length + chunk.length);
+      temp.set(rxBuffer);
+      temp.set(chunk, rxBuffer.length);
+      rxBuffer = temp;
+
+      // Un paquete JBD completo empieza por 0xDD y cierra con 0x77
+      if (rxBuffer.length >= 7 && rxBuffer[0] === 0xDD && rxBuffer[rxBuffer.length - 1] === 0x77) {
+        parseJbdFrame(new DataView(rxBuffer.buffer));
+        rxBuffer = new Uint8Array(0);
+      } else if (rxBuffer.length > 60) {
+        rxBuffer = new Uint8Array(0);
+      }
+    }
+
+    function parseJbdFrame(data) {
+      if (data.getUint8(1) === 0x03) {
         const v = (data.getUint16(4) / 100).toFixed(1);
         const a = (data.getInt16(6) / 100).toFixed(2);
         const currentAh = data.getUint16(8) / 100;
