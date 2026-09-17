@@ -19,6 +19,7 @@
     .health-good { color: #00e676; }
     .health-warn { color: #ffab00; }
     .health-bad { color: #ff5252; }
+    .debug-box { font-family: monospace; font-size: 0.72rem; color: #ffeb3b; word-break: break-all; margin-top: 8px; }
   </style>
 </head>
 <body>
@@ -26,9 +27,10 @@
     <div class="card">
       <button id="btnConnect" class="btn">Conectar con la Moto</button>
       <div id="connStatus" class="label" style="margin-top: 8px;">Bluetooth desconectado</div>
+      <div id="debugLog" class="debug-box"></div>
     </div>
 
-    <!-- Nivel, Salud y Telemetría -->
+    <!-- Telemetría y Salud -->
     <div class="card">
       <div class="label">NIVEL DE CARGA ACTUAL</div>
       <div id="soc" class="soc-val">--%</div>
@@ -70,19 +72,20 @@
   </div>
 
   <script>
-    // Servicios GATT exactos leídos de nRF Connect
-    const CANDIDATE_SERVICES = [
-      "00010203-0405-0607-0809-0a0b0c0dffe0",
-      "00010203-0405-0607-0809-0a0b0c0d1912",
-      "11110001-1111-1111-1111-111111111111",
-      "device_information"
-    ];
+    // Canales extraídos directamente de nRF Connect
+    const SERVICE_UUID = "00010203-0405-0607-0809-0a0b0c0dffe0";
+    const WRITE_UUID   = "00010203-0405-0607-0809-0a0b0c0dffe2";
+    const NOTIFY_UUID  = "00010203-0405-0607-0809-0a0b0c0dffe1";
 
     const CMD_READ = new Uint8Array([0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77]);
     const NOMINAL_CAPACITY_AH = 20.0;
 
-    let bleDevice, writeCharacteristic, pollInterval;
+    let bleDevice, writeChar, pollInterval;
     let rxBuffer = new Uint8Array(0);
+
+    function log(msg) {
+      document.getElementById('debugLog').innerText = msg;
+    }
 
     window.addEventListener('DOMContentLoaded', () => {
       const lat = localStorage.getItem('last_park_lat');
@@ -94,51 +97,50 @@
     document.getElementById('btnConnect').addEventListener('click', async () => {
       try {
         bleDevice = await navigator.bluetooth.requestDevice({
-          filters: [
-            { namePrefix: 'LK' },
-            { namePrefix: 'lk' }
-          ],
-          optionalServices: CANDIDATE_SERVICES
+          filters: [{ namePrefix: 'LK' }, { namePrefix: 'lk' }],
+          optionalServices: [SERVICE_UUID]
         });
 
         bleDevice.addEventListener('gattserverdisconnected', handleDisconnect);
 
-        document.getElementById('connStatus').innerText = "Conectando con " + bleDevice.name + "...";
+        log("Conectando GATT...");
         const server = await bleDevice.gatt.connect();
 
-        const services = await server.getPrimaryServices();
-        let notifyChar = null;
+        log("Obteniendo servicio ffe0...");
+        const service = await server.getPrimaryService(SERVICE_UUID);
 
-        for (const s of services) {
-          try {
-            const chars = await s.getCharacteristics();
-            for (const c of chars) {
-              if (c.properties.notify || c.properties.indicate) notifyChar = c;
-              if (c.properties.write || c.properties.writeWithoutResponse) writeCharacteristic = c;
-            }
-          } catch(e) {}
-          if (writeCharacteristic && notifyChar) break;
-        }
-
-        if (!writeCharacteristic || !notifyChar) {
-          throw new Error("Canal de datos no encontrado.");
-        }
+        log("Obteniendo canales ffe1 / ffe2...");
+        writeChar = await service.getCharacteristic(WRITE_UUID);
+        const notifyChar = await service.getCharacteristic(NOTIFY_UUID);
 
         await notifyChar.startNotifications();
-        notifyChar.addEventListener('characteristicvaluechanged', onRawChunk);
+        notifyChar.addEventListener('characteristicvaluechanged', onRawData);
 
         document.getElementById('btnConnect').innerText = "Conectado";
         document.getElementById('btnConnect').style.background = "#00c853";
-        document.getElementById('connStatus').innerText = "Enlazado a: " + bleDevice.name;
+        document.getElementById('connStatus').innerText = "Enlazado a " + bleDevice.name;
+        log("Canales listos. Enviando peticiones...");
 
-        pollInterval = setInterval(() => {
-          if (bleDevice && bleDevice.gatt.connected) {
-            writeCharacteristic.writeValue(CMD_READ);
+        // Función de envío compatible
+        async function sendQuery() {
+          if (!bleDevice || !bleDevice.gatt.connected) return;
+          try {
+            if (writeChar.writeValueWithoutResponse) {
+              await writeChar.writeValueWithoutResponse(CMD_READ);
+            } else {
+              await writeChar.writeValue(CMD_READ);
+            }
+          } catch(e) {
+            log("Error envío: " + e.message);
           }
-        }, 2000);
+        }
+
+        sendQuery();
+        pollInterval = setInterval(sendQuery, 2000);
 
       } catch (err) {
-        document.getElementById('connStatus').innerText = "Error: " + err.message;
+        document.getElementById('connStatus').innerText = "Error";
+        log(err.message);
       }
     });
 
@@ -177,24 +179,25 @@
       mapsBtn.style.display = "block";
     }
 
-    // Ensamblador de paquetes BLE fragmentados
-    function onRawChunk(event) {
+    function onRawData(event) {
       const chunk = new Uint8Array(event.target.value.buffer);
+      const hexStr = Array.from(chunk).map(b => b.toString(16).padStart(2, '0')).join(' ');
+      log("Respuesta recibida: " + hexStr.substring(0, 30));
+
       const temp = new Uint8Array(rxBuffer.length + chunk.length);
       temp.set(rxBuffer);
       temp.set(chunk, rxBuffer.length);
       rxBuffer = temp;
 
-      // Un paquete JBD completo empieza por 0xDD y cierra con 0x77
       if (rxBuffer.length >= 7 && rxBuffer[0] === 0xDD && rxBuffer[rxBuffer.length - 1] === 0x77) {
-        parseJbdFrame(new DataView(rxBuffer.buffer));
+        parseTelemetry(new DataView(rxBuffer.buffer));
         rxBuffer = new Uint8Array(0);
       } else if (rxBuffer.length > 60) {
         rxBuffer = new Uint8Array(0);
       }
     }
 
-    function parseJbdFrame(data) {
+    function parseTelemetry(data) {
       if (data.getUint8(1) === 0x03) {
         const v = (data.getUint16(4) / 100).toFixed(1);
         const a = (data.getInt16(6) / 100).toFixed(2);
