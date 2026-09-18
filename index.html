@@ -10,14 +10,17 @@
     .container { width: 100%; max-width: 360px; }
     .card { background: #1a1e24; border-radius: 14px; padding: 18px; margin-bottom: 14px; border: 1px solid #2a303c; text-align: center; }
     .btn { background: #0066ff; color: #fff; border: none; padding: 14px; border-radius: 10px; font-size: 1rem; font-weight: bold; width: 100%; cursor: pointer; }
-    .btn-maps { background: #00c853; color: #000; text-decoration: none; display: none; padding: 13px; border-radius: 10px; font-weight: bold; margin-top: 12px; text-align: center; font-size: 1rem; }
+    .btn-maps { background: #00c853; color: #000; text-decoration: none; display: none; padding: 12px; border-radius: 10px; font-weight: bold; margin-top: 12px; text-align: center; }
     .btn-test { background: transparent; color: #8a94a6; border: 1px solid #3a4250; padding: 10px; border-radius: 8px; font-size: 0.82rem; width: 100%; cursor: pointer; margin-top: 10px; }
     .soc-val { font-size: 3rem; font-weight: 800; color: #00e676; margin: 5px 0; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .stat-box { background: #13171d; padding: 12px; border-radius: 8px; text-align: center; }
     .stat-val { font-size: 1.2rem; font-weight: bold; color: #fff; }
     .label { font-size: 0.8rem; color: #8a94a6; margin-top: 4px; }
-    .gps-status { font-size: 0.82rem; color: #29b6f6; margin-top: 8px; min-height: 1.2em; }
+    .health-good { color: #00e676; }
+    .health-warn { color: #ffab00; }
+    .health-bad { color: #ff5252; }
+    .debug-box { font-family: monospace; font-size: 0.72rem; color: #ffeb3b; word-break: break-all; margin-top: 8px; min-height: 1.2em; }
   </style>
 </head>
 <body>
@@ -25,24 +28,23 @@
     <div class="card">
       <button id="btnConnect" class="btn">Conectar con la Moto</button>
       <div id="connStatus" class="label" style="margin-top: 8px;">Bluetooth desconectado</div>
-      <div id="gpsStatus" class="gps-status"></div>
+      <div id="debugLog" class="debug-box"></div>
     </div>
 
-    <!-- Registro de Ubicación -->
-    <div class="card">
-      <div class="label" style="letter-spacing: 0.5px;">ÚLTIMO APARCAMIENTO</div>
-      <div id="parkInfo" style="margin-top: 10px; font-size: 1.1rem; font-weight: bold; color: #fff;">Sin registros previos</div>
-      <div id="parkCoords" class="label" style="margin-top: 4px;">--</div>
-      
-      <a id="btnMaps" class="btn-maps" target="_blank" href="#">📍 Abrir en Google Maps</a>
-      <button id="btnManual" class="btn-test">📍 Probar / Guardar posición ahora</button>
-    </div>
-
-    <!-- Telemetría (en espera de protocolo) -->
+    <!-- Telemetría y Salud -->
     <div class="card">
       <div class="label">NIVEL DE CARGA ACTUAL</div>
       <div id="soc" class="soc-val">--%</div>
+      
       <div class="grid" style="margin-top: 10px;">
+        <div class="stat-box">
+          <div id="soh" class="stat-val">--%</div>
+          <div class="label">Salud (SoH)</div>
+        </div>
+        <div class="stat-box">
+          <div id="cycles" class="stat-val">--</div>
+          <div class="label">Ciclos Totales</div>
+        </div>
         <div class="stat-box">
           <div id="voltage" class="stat-val">-- V</div>
           <div class="label">Voltaje Total</div>
@@ -51,15 +53,49 @@
           <div id="current" class="stat-val">-- A</div>
           <div class="label">Amperios</div>
         </div>
+        <div class="stat-box">
+          <div id="capacity" class="stat-val">-- Ah</div>
+          <div class="label">Capacidad Actual</div>
+        </div>
+        <div class="stat-box">
+          <div id="temp" class="stat-val">-- °C</div>
+          <div class="label">Temperatura</div>
+        </div>
       </div>
+    </div>
+
+    <!-- Registro de Ubicación -->
+    <div class="card">
+      <div class="label" style="letter-spacing: 0.5px;">ÚLTIMO APARCAMIENTO</div>
+      <div id="parkInfo" style="margin-top: 8px; font-size: 0.95rem; color: #cfd6e0;">Sin registros previos</div>
+      <a id="btnMaps" class="btn-maps" target="_blank" href="#">📍 Ver en Google Maps</a>
+      <button id="btnManual" class="btn-test">📍 Guardar ubicación manualmente</button>
     </div>
   </div>
 
   <script>
     const SERVICE_UUID = "00010203-0405-0607-0809-0a0b0c0dffe0";
-    let bleDevice = null;
+    const WRITE_UUID   = "00010203-0405-0607-0809-0a0b0c0dffe2";
+    const NOTIFY_UUID  = "00010203-0405-0607-0809-0a0b0c0dffe1";
 
-    // Al abrir la web, cargar la posición almacenada previamente
+    // Comandos de consulta del protocolo Daly BMS
+    const DALY_CMD_SOC    = new Uint8Array([0xA5, 0x40, 0x90, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7D]);
+    const DALY_CMD_TEMP   = new Uint8Array([0xA5, 0x40, 0x92, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7F]);
+    const DALY_CMD_CYCLES = new Uint8Array([0xA5, 0x40, 0x93, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80]);
+
+    // Comando alternativo Jiabaida (respaldo)
+    const JBD_CMD_READ    = new Uint8Array([0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77]);
+
+    const NOMINAL_CAPACITY_AH = 20.0;
+
+    let bleDevice, writeChar, pollInterval;
+    let rxBuffer = new Uint8Array(0);
+    let pollStep = 0;
+
+    function log(msg) {
+      document.getElementById('debugLog').innerText = msg;
+    }
+
     window.addEventListener('DOMContentLoaded', () => {
       const lat = localStorage.getItem('last_park_lat');
       const lng = localStorage.getItem('last_park_lng');
@@ -67,15 +103,12 @@
       if (lat && lng) showParking(lat, lng, time);
     });
 
-    // Botón manual de prueba directa
     document.getElementById('btnManual').addEventListener('click', () => {
-      document.getElementById('gpsStatus').innerText = "Obteniendo GPS...";
-      recordPosition("Guardado manual");
+      saveLocation();
     });
 
     document.getElementById('btnConnect').addEventListener('click', async () => {
-      // 1. Pedir permiso de GPS inmediatamente durante la pulsación del usuario
-      recordPosition("Posición inicial");
+      saveLocation();
 
       try {
         bleDevice = await navigator.bluetooth.requestDevice({
@@ -85,33 +118,146 @@
 
         bleDevice.addEventListener('gattserverdisconnected', handleDisconnect);
 
-        document.getElementById('connStatus').innerText = "Conectando...";
-        await bleDevice.gatt.connect();
+        log("Conectando con el BMS...");
+        const server = await bleDevice.gatt.connect();
+        const service = await server.getPrimaryService(SERVICE_UUID);
 
-        document.getElementById('btnConnect').innerText = "Moto Enlazada";
+        writeChar = await service.getCharacteristic(WRITE_UUID);
+        const notifyChar = await service.getCharacteristic(NOTIFY_UUID);
+
+        await notifyChar.startNotifications();
+        notifyChar.addEventListener('characteristicvaluechanged', onDataReceived);
+
+        document.getElementById('btnConnect').innerText = "Conectado";
         document.getElementById('btnConnect').style.background = "#00c853";
         document.getElementById('connStatus').innerText = "Enlazado a " + bleDevice.name;
-        document.getElementById('gpsStatus').innerText = "Rastreo activo. Al apagar se fijará el punto.";
+        log("Enviando tramas Daly...");
+
+        pollStep = 0;
+        sendNextQuery();
+        pollInterval = setInterval(sendNextQuery, 2000);
 
       } catch (err) {
         document.getElementById('connStatus').innerText = "Conexión cancelada";
+        log(err.message);
       }
     });
 
+    async function sendNextQuery() {
+      if (!bleDevice || !bleDevice.gatt.connected || !writeChar) return;
+
+      const cmds = [DALY_CMD_SOC, DALY_CMD_TEMP, DALY_CMD_CYCLES, JBD_CMD_READ];
+      const cmdToSend = cmds[pollStep % cmds.length];
+      pollStep++;
+
+      try {
+        if (writeChar.writeValueWithoutResponse) {
+          await writeChar.writeValueWithoutResponse(cmdToSend);
+        } else {
+          await writeChar.writeValue(cmdToSend);
+        }
+      } catch (e) {
+        log("Error de envío: " + e.message);
+      }
+    }
+
+    function onDataReceived(event) {
+      const chunk = new Uint8Array(event.target.value.buffer);
+      const hexStr = Array.from(chunk).map(b => b.toString(16).padStart(2, '0')).join(' ');
+      log("Respuesta (" + chunk.length + "B): " + hexStr);
+
+      const temp = new Uint8Array(rxBuffer.length + chunk.length);
+      temp.set(rxBuffer);
+      temp.set(chunk, rxBuffer.length);
+      rxBuffer = temp;
+
+      // Detección de trama Daly BMS (13 bytes, cabecera 0xA5)
+      while (rxBuffer.length >= 13) {
+        let startIndex = -1;
+        for (let i = 0; i <= rxBuffer.length - 13; i++) {
+          if (rxBuffer[i] === 0xA5 && rxBuffer[i + 1] === 0x01) {
+            startIndex = i;
+            break;
+          }
+        }
+
+        if (startIndex === -1) {
+          if (rxBuffer[0] !== 0xDD) rxBuffer = new Uint8Array(0);
+          break;
+        }
+
+        const frame = new DataView(rxBuffer.buffer, rxBuffer.byteOffset + startIndex, 13);
+        parseDalyFrame(frame);
+        rxBuffer = rxBuffer.slice(startIndex + 13);
+      }
+
+      // Soporte Jiabaida (respaldo por si responde con 0xDD)
+      if (rxBuffer.length >= 7 && rxBuffer[0] === 0xDD && rxBuffer[rxBuffer.length - 1] === 0x77) {
+        parseJbdFrame(new DataView(rxBuffer.buffer));
+        rxBuffer = new Uint8Array(0);
+      }
+    }
+
+    function parseDalyFrame(data) {
+      const cmdId = data.getUint8(2);
+
+      if (cmdId === 0x90) { // Voltaje, Corriente, SOC
+        const v = (((data.getUint8(4) << 8) | data.getUint8(5)) / 10.0).toFixed(1);
+        const rawCurrent = (data.getUint8(8) << 8) | data.getUint8(9);
+        const a = ((rawCurrent - 30000) / 10.0).toFixed(2);
+        const soc = (((data.getUint8(10) << 8) | data.getUint8(11)) / 10.0).toFixed(0);
+
+        document.getElementById('voltage').innerText = `${v} V`;
+        document.getElementById('current').innerText = `${a} A`;
+        document.getElementById('soc').innerText = `${soc}%`;
+
+        const currentAh = ((parseFloat(soc) / 100) * NOMINAL_CAPACITY_AH).toFixed(1);
+        document.getElementById('capacity').innerText = `${currentAh} Ah`;
+      } 
+      else if (cmdId === 0x92) { // Temperatura
+        const temp = data.getUint8(4) - 40;
+        document.getElementById('temp').innerText = `${temp} °C`;
+      } 
+      else if (cmdId === 0x93) { // Ciclos de carga
+        const cycles = (data.getUint8(5) << 8) | data.getUint8(6);
+        document.getElementById('cycles').innerText = cycles;
+
+        // Estimación de SoH por degradación de ciclos en LFP (base ~2000 ciclos)
+        let soh = Math.max(70, Math.round(100 - (cycles * 0.01)));
+        const sohElem = document.getElementById('soh');
+        sohElem.innerText = `${soh}%`;
+        sohElem.className = "stat-val " + (soh >= 85 ? "health-good" : (soh >= 75 ? "health-warn" : "health-bad"));
+      }
+    }
+
+    function parseJbdFrame(data) {
+      if (data.getUint8(1) === 0x03) {
+        const v = (data.getUint16(4) / 100).toFixed(1);
+        const a = (data.getInt16(6) / 100).toFixed(2);
+        const currentAh = data.getUint16(8) / 100;
+        const cycles = data.getUint16(14);
+        const soc = data.getUint8(23);
+        const temp = (((data.getUint16(27)) - 2731) / 10).toFixed(1);
+
+        document.getElementById('voltage').innerText = `${v} V`;
+        document.getElementById('current').innerText = `${a} A`;
+        document.getElementById('capacity').innerText = `${currentAh.toFixed(1)} Ah`;
+        document.getElementById('soc').innerText = `${soc}%`;
+        document.getElementById('temp').innerText = `${temp} °C`;
+        document.getElementById('cycles').innerText = cycles;
+      }
+    }
+
     function handleDisconnect() {
+      clearInterval(pollInterval);
       document.getElementById('btnConnect').innerText = "Reconectar";
       document.getElementById('btnConnect').style.background = "#0066ff";
       document.getElementById('connStatus').innerText = "Moto apagada / Fuera de rango";
-      document.getElementById('gpsStatus').innerText = "Guardando punto de aparcamiento...";
-
-      recordPosition("Aparcada");
+      saveLocation();
     }
 
-    function recordPosition(origenTexto) {
-      if (!("geolocation" in navigator)) {
-        document.getElementById('gpsStatus').innerText = "Navegador sin soporte GPS";
-        return;
-      }
+    function saveLocation() {
+      if (!("geolocation" in navigator)) return;
 
       navigator.geolocation.getCurrentPosition(
         (pos) => {
@@ -125,22 +271,14 @@
           localStorage.setItem('last_park_time', timeStr);
 
           showParking(lat, lng, timeStr);
-          document.getElementById('gpsStatus').innerText = "Ubicación fijada correctamente";
         },
-        (err) => {
-          document.getElementById('gpsStatus').innerText = "Aviso: activa el GPS del móvil";
-        },
-        { 
-          enableHighAccuracy: false, // Permite antenas y Wi-Fi para que no falle dentro de edificios
-          timeout: 12000, 
-          maximumAge: 30000 
-        }
+        () => {},
+        { enableHighAccuracy: false, timeout: 10000, maximumAge: 30000 }
       );
     }
 
     function showParking(lat, lng, time) {
-      document.getElementById('parkInfo').innerText = time;
-      document.getElementById('parkCoords').innerText = `Lat: ${parseFloat(lat).toFixed(4)}, Lng: ${parseFloat(lng).toFixed(4)}`;
+      document.getElementById('parkInfo').innerText = `Aparcada: ${time}`;
       const mapsBtn = document.getElementById('btnMaps');
       mapsBtn.href = `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
       mapsBtn.style.display = "block";
